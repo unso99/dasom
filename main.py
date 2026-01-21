@@ -1,6 +1,6 @@
 import streamlit as st
 from langchain_core.messages import ChatMessage
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, load_prompt
 from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import StrOutputParser
 from dotenv import load_dotenv
@@ -14,6 +14,9 @@ if "messages" not in st.session_state:
     
 with st.sidebar:
     clear_btn = st.button("대화 초기화")
+    selected_prompt = st.selectbox(
+        "프롬프트를 선택해 주세요.", ("기본모드","SNS 게시글","요약"), index=0
+    )
 
 if clear_btn:
     st.session_state["messages"] = []
@@ -25,7 +28,7 @@ def print_messages():
 def add_message(role,message):
     st.session_state["messages"].append(ChatMessage(role=role, content=message))
 
-def create_chain():
+def create_chain(prompt_type):
     prompt = ChatPromptTemplate.from_messages(
         [
             ("system",
@@ -43,6 +46,11 @@ def create_chain():
             ("user", "{question}"),
         ]
     )
+    if prompt_type == "SNS 게시글":
+        prompt = load_prompt("sns.yaml", encoding="utf-8")
+    if prompt_type == "요약":
+        prompt = load_prompt("summary.yaml", encoding="utf-8")
+
     llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
     output_parser = StrOutputParser()
 
@@ -55,7 +63,7 @@ user_input = st.chat_input("궁금한 내용을 물어보세요!")
 
 if user_input:
     st.chat_message("user").write(user_input)
-    chain = create_chain()
+    chain = create_chain(selected_prompt)
     response = chain.stream({"question": user_input})
 
     with st.chat_message("assistant"):
