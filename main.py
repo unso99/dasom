@@ -4,10 +4,16 @@ from langchain_core.prompts import ChatPromptTemplate, load_prompt
 from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.output_parsers import PydanticOutputParser
+from langchain_community.utilities import SerpAPIWrapper
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# SerpAPI
+params = {"engine": "google", "gl": "kr", "hl": "ko", "num": "3"}
+
+search = SerpAPIWrapper(params=params)
 
 class EmailSummary(BaseModel):
     person: str = Field(description="메일을 보낸 사람")
@@ -101,6 +107,15 @@ if user_input:
             try:
                 result = chain.invoke({"email_conversation": user_input})
                 render_email_summary(result)
+
+                # ✅ 테스트: 발신자 정보로 검색
+                query = f"{result.person} {result.company} {result.email}"
+                search_result = search.run(query)
+                
+                st.markdown("---")
+                st.markdown("**🔍 발신자 검색 결과**")
+                st.write(search_result)
+
                 ai_answer = f"발신자: {result.person} / 회사: {result.company} / 요약: {result.summary}"
             except Exception as e:
                 ai_answer = "⚠️ 이메일 형식의 내용을 입력해 주세요.\n\nFrom, Subject, 본문이 포함된 이메일을 붙여넣으면 요약해드립니다."
