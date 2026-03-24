@@ -1,20 +1,20 @@
 import streamlit as st
-from langchain_core.messages import ChatMessage
-from langchain_core.prompts import ChatPromptTemplate, load_prompt
+from langchain_core.messages import ChatMessage, HumanMessage, AIMessage
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, load_prompt
 from langchain_openai import ChatOpenAI
-from langchain_core.output_parsers import StrOutputParser
-from langchain_core.output_parsers import PydanticOutputParser
+from langchain_core.output_parsers import StrOutputParser, PydanticOutputParser
 from langchain_community.utilities import SerpAPIWrapper
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# SerpAPI
+# ── SerpAPI 설정 ──────────────────────────────────────────────
 params = {"engine": "google", "gl": "kr", "hl": "ko", "num": "3"}
-
 search = SerpAPIWrapper(params=params)
 
+
+# ── Pydantic 모델 ─────────────────────────────────────────────
 class EmailSummary(BaseModel):
     person: str = Field(description="메일을 보낸 사람")
     company: str = Field(description="메일을 보낸 사람의 회사 정보")
@@ -23,10 +23,13 @@ class EmailSummary(BaseModel):
     summary: str = Field(description="메일 본문을 요약한 텍스트")
     date: str = Field(description="메일 본문에 언급된 미팅 날짜와 시간")
 
+
+# ── 체인 생성 ─────────────────────────────────────────────────
 def create_email_report_chain():
     prompt = load_prompt("email_report.yaml", encoding="utf-8")
     llm = ChatOpenAI(model="gpt-4o", temperature=0)
     return prompt | llm | StrOutputParser()
+
 
 def create_email_chain():
     parser = PydanticOutputParser(pydantic_object=EmailSummary)
@@ -35,13 +38,18 @@ def create_email_chain():
     llm = ChatOpenAI(model="gpt-4o", temperature=0)
     return prompt | llm | parser
 
+
 def create_chain(prompt_type):
-    # ✅ 이메일 요약은 별도 체인 반환
     if prompt_type == "이메일 요약":
         return create_email_chain()
 
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", """당신의 이름은 'Dasom'이며, 사용자를 돕는 AI 어시스턴트입니다.
+    if prompt_type == "SNS 게시글":
+        prompt = load_prompt("sns.yaml", encoding="utf-8")
+    elif prompt_type == "요약":
+        prompt = load_prompt("summary.yaml", encoding="utf-8")
+    else:
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", """당신의 이름은 'Dasom'이며, 사용자를 돕는 AI 어시스턴트입니다.
 
 ## 응답 원칙
 - 한국어로 자연스럽고 명확하게 답변합니다.
@@ -52,15 +60,35 @@ def create_chain(prompt_type):
 ## 답변 형식
 - 불필요한 서론 없이 바로 본론으로 들어갑니다.
 - 복잡한 내용은 단계별로 설명합니다."""),
-        ("user", "{question}"),
-    ])
-    if prompt_type == "SNS 게시글":
-        prompt = load_prompt("sns.yaml", encoding="utf-8")
-    if prompt_type == "요약":
-        prompt = load_prompt("summary.yaml", encoding="utf-8")
+            MessagesPlaceholder(variable_name="chat_history"),
+            ("user", "{question}"),
+        ])
 
     return prompt | ChatOpenAI(model="gpt-4o", temperature=0.7) | StrOutputParser()
 
+
+# ── 히스토리 변환 ─────────────────────────────────────────────
+def get_chat_history():
+    history = []
+    for msg in st.session_state["messages"]:
+        if msg.role == "user":
+            history.append(HumanMessage(content=msg.content))
+        elif msg.role == "assistant":
+            history.append(AIMessage(content=msg.content))
+    return history
+
+
+# ── 메시지 출력 / 저장 ────────────────────────────────────────
+def print_messages():
+    for chat_message in st.session_state["messages"]:
+        st.chat_message(chat_message.role).write(chat_message.content)
+
+
+def add_message(role, message):
+    st.session_state["messages"].append(ChatMessage(role=role, content=message))
+
+
+# ── UI ────────────────────────────────────────────────────────
 st.title("Dasom")
 
 if "messages" not in st.session_state:
@@ -69,7 +97,9 @@ if "messages" not in st.session_state:
 with st.sidebar:
     clear_btn = st.button("대화 초기화")
     selected_prompt = st.selectbox(
-        "프롬프트를 선택해 주세요.", ("기본모드", "SNS 게시글", "요약", "이메일 요약"), index=0
+        "프롬프트를 선택해 주세요.",
+        ("기본모드", "SNS 게시글", "요약", "이메일 요약"),
+        index=0
     )
     if selected_prompt == "이메일 요약":
         st.info("📧 이메일 원문을 채팅창에 붙여넣으세요.")
@@ -77,17 +107,10 @@ with st.sidebar:
 if clear_btn:
     st.session_state["messages"] = []
 
-def print_messages():
-    for chat_message in st.session_state["messages"]:
-        st.chat_message(chat_message.role).write(chat_message.content)
-
-def add_message(role, message):
-    st.session_state["messages"].append(ChatMessage(role=role, content=message))
-
 print_messages()
 
 placeholder = "이메일 내용을 붙여넣으세요!" if selected_prompt == "이메일 요약" else "궁금한 내용을 물어보세요!"
-user_input = st.chat_input("궁금한 내용을 물어보세요!")
+user_input = st.chat_input(placeholder)
 
 if user_input:
     st.chat_message("user").write(user_input)
@@ -98,35 +121,35 @@ if user_input:
             try:
                 result = chain.invoke({"email_conversation": user_input})
 
-                # ✅ 테스트: 발신자 정보로 검색
                 query = f"{result.person} {result.company} {result.email}"
                 search_result = search.run(query)
                 search_result_string = "\n".join(search_result)
 
                 email_report_chain = create_email_report_chain()
-                email_report_response = email_report_chain.invoke(
-                    {
-                        "sender": result.person,
-                        "additional_information" : search_result_string,
-                        "company" : result.company,
-                        "email": result.email,
-                        "subject": result.subject,
-                        "summary" : result.summary,
-                        "date" : result.date
-                    }
-                )
+                email_report_response = email_report_chain.invoke({
+                    "sender": result.person,
+                    "additional_information": search_result_string,
+                    "company": result.company,
+                    "email": result.email,
+                    "subject": result.subject,
+                    "summary": result.summary,
+                    "date": result.date
+                })
 
                 st.markdown("---")
-                st.markdown(email_report_response)  
-                ai_answer = email_report_response 
-                
+                st.markdown(email_report_response)
+                ai_answer = email_report_response
+
             except Exception as e:
                 ai_answer = "⚠️ 이메일 형식의 내용을 입력해 주세요.\n\nFrom, Subject, 본문이 포함된 이메일을 붙여넣으면 요약해드립니다."
                 st.markdown(ai_answer)
         else:
             container = st.empty()
             ai_answer = ""
-            for token in chain.stream({"question": user_input}):
+            for token in chain.stream({
+                "question": user_input,
+                "chat_history": get_chat_history()
+            }):
                 ai_answer += token
                 container.markdown(ai_answer)
 
