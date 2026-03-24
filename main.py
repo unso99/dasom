@@ -23,6 +23,11 @@ class EmailSummary(BaseModel):
     summary: str = Field(description="메일 본문을 요약한 텍스트")
     date: str = Field(description="메일 본문에 언급된 미팅 날짜와 시간")
 
+def create_email_report_chain():
+    prompt = load_prompt("email_report.yaml", encoding="utf-8")
+    llm = ChatOpenAI(model="gpt-4o", temperature=0)
+    return prompt | llm | StrOutputParser()
+
 def create_email_chain():
     parser = PydanticOutputParser(pydantic_object=EmailSummary)
     prompt = load_prompt("email_summary.yaml", encoding="utf-8")
@@ -55,20 +60,6 @@ def create_chain(prompt_type):
         prompt = load_prompt("summary.yaml", encoding="utf-8")
 
     return prompt | ChatOpenAI(model="gpt-4o", temperature=0.7) | StrOutputParser()
-
-def render_email_summary(result: EmailSummary):
-    st.markdown(f"""
-**발신자:** {result.person}  
-**회사:** {result.company}  
-**이메일:** {result.email}  
-**제목:** {result.subject}  
-**미팅 일정:** {result.date}  
-
----
-
-**요약**  
-{result.summary}
-""")
 
 st.title("Dasom")
 
@@ -106,17 +97,29 @@ if user_input:
         if selected_prompt == "이메일 요약":
             try:
                 result = chain.invoke({"email_conversation": user_input})
-                render_email_summary(result)
 
                 # ✅ 테스트: 발신자 정보로 검색
                 query = f"{result.person} {result.company} {result.email}"
                 search_result = search.run(query)
-                
-                st.markdown("---")
-                st.markdown("**🔍 발신자 검색 결과**")
-                st.write(search_result)
+                search_result_string = "\n".join(search_result)
 
-                ai_answer = f"발신자: {result.person} / 회사: {result.company} / 요약: {result.summary}"
+                email_report_chain = create_email_report_chain()
+                email_report_response = email_report_chain.invoke(
+                    {
+                        "sender": result.person,
+                        "additional_information" : search_result_string,
+                        "company" : result.company,
+                        "email": result.email,
+                        "subject": result.subject,
+                        "summary" : result.summary,
+                        "date" : result.date
+                    }
+                )
+
+                st.markdown("---")
+                st.markdown(email_report_response)  
+                ai_answer = email_report_response 
+                
             except Exception as e:
                 ai_answer = "⚠️ 이메일 형식의 내용을 입력해 주세요.\n\nFrom, Subject, 본문이 포함된 이메일을 붙여넣으면 요약해드립니다."
                 st.markdown(ai_answer)
