@@ -1,20 +1,21 @@
 import streamlit as st
-from langchain_core.messages import ChatMessage, HumanMessage, AIMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, load_prompt
+from langchain_core.messages import ChatMessage
+from langchain_core.prompts import ChatPromptTemplate, load_prompt
 from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import StrOutputParser, PydanticOutputParser
-from langchain_community.utilities import SerpAPIWrapper
+from langchain_core.runnables import RunnablePassthrough
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+import tempfile
+import os
+
+from retriever import build_retriever
 
 load_dotenv()
 
-# ── SerpAPI 설정 ──────────────────────────────────────────────
-params = {"engine": "google", "gl": "kr", "hl": "ko", "num": "3"}
-search = SerpAPIWrapper(params=params)
 
+# ── Pydantic 모델 ──────────────────────────────────────────────────────────────
 
-# ── Pydantic 모델 ─────────────────────────────────────────────
 class EmailSummary(BaseModel):
     person: str = Field(description="메일을 보낸 사람")
     company: str = Field(description="메일을 보낸 사람의 회사 정보")
@@ -24,12 +25,7 @@ class EmailSummary(BaseModel):
     date: str = Field(description="메일 본문에 언급된 미팅 날짜와 시간")
 
 
-# ── 체인 생성 ─────────────────────────────────────────────────
-def create_email_report_chain():
-    prompt = load_prompt("email_report.yaml", encoding="utf-8")
-    llm = ChatOpenAI(model="gpt-4o", temperature=0)
-    return prompt | llm | StrOutputParser()
-
+# ── 체인 팩토리 ────────────────────────────────────────────────────────────────
 
 def create_email_chain():
     parser = PydanticOutputParser(pydantic_object=EmailSummary)
@@ -39,17 +35,39 @@ def create_email_chain():
     return prompt | llm | parser
 
 
+def create_rag_chain(retriever):
+    """업로드된 PDF를 기반으로 답변하는 RAG 체인을 생성합니다."""
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """당신의 이름은 'Dasom'이며, 주어진 문서를 기반으로 사용자의 질문에 답변하는 AI 어시스턴트입니다.
+
+## 응답 원칙
+- 반드시 아래 제공된 문서(context) 내용을 근거로 답변합니다.
+- 문서에 없는 내용은 "해당 내용은 문서에서 찾을 수 없습니다."라고 솔직히 말합니다.
+- 한국어로 자연스럽고 명확하게 답변합니다.
+- 출처가 되는 내용은 요약해서 함께 제시합니다.
+
+## 문서 내용
+{context}"""),
+        ("user", "{question}"),
+    ])
+
+    def format_docs(docs):
+        return "\n\n".join(doc.page_content for doc in docs)
+
+    return (
+        {"context": retriever | format_docs, "question": RunnablePassthrough()}
+        | prompt
+        | ChatOpenAI(model="gpt-4o", temperature=0)
+        | StrOutputParser()
+    )
+
+
 def create_chain(prompt_type):
     if prompt_type == "이메일 요약":
         return create_email_chain()
 
-    if prompt_type == "SNS 게시글":
-        prompt = load_prompt("sns.yaml", encoding="utf-8")
-    elif prompt_type == "요약":
-        prompt = load_prompt("summary.yaml", encoding="utf-8")
-    else:
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", """당신의 이름은 'Dasom'이며, 사용자를 돕는 AI 어시스턴트입니다.
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """당신의 이름은 'Dasom'이며, 사용자를 돕는 AI 어시스턴트입니다.
 
 ## 응답 원칙
 - 한국어로 자연스럽고 명확하게 답변합니다.
@@ -60,25 +78,33 @@ def create_chain(prompt_type):
 ## 답변 형식
 - 불필요한 서론 없이 바로 본론으로 들어갑니다.
 - 복잡한 내용은 단계별로 설명합니다."""),
-            MessagesPlaceholder(variable_name="chat_history"),
-            ("user", "{question}"),
-        ])
+        ("user", "{question}"),
+    ])
+    if prompt_type == "SNS 게시글":
+        prompt = load_prompt("sns.yaml", encoding="utf-8")
+    if prompt_type == "요약":
+        prompt = load_prompt("summary.yaml", encoding="utf-8")
 
     return prompt | ChatOpenAI(model="gpt-4o", temperature=0.7) | StrOutputParser()
 
 
-# ── 히스토리 변환 ─────────────────────────────────────────────
-def get_chat_history():
-    history = []
-    for msg in st.session_state["messages"]:
-        if msg.role == "user":
-            history.append(HumanMessage(content=msg.content))
-        elif msg.role == "assistant":
-            history.append(AIMessage(content=msg.content))
-    return history
+# ── 렌더링 헬퍼 ───────────────────────────────────────────────────────────────
+
+def render_email_summary(result: EmailSummary):
+    st.markdown(f"""
+**발신자:** {result.person}  
+**회사:** {result.company}  
+**이메일:** {result.email}  
+**제목:** {result.subject}  
+**미팅 일정:** {result.date}  
+
+---
+
+**요약**  
+{result.summary}
+""")
 
 
-# ── 메시지 출력 / 저장 ────────────────────────────────────────
 def print_messages():
     for chat_message in st.session_state["messages"]:
         st.chat_message(chat_message.role).write(chat_message.content)
@@ -88,20 +114,62 @@ def add_message(role, message):
     st.session_state["messages"].append(ChatMessage(role=role, content=message))
 
 
-# ── UI ────────────────────────────────────────────────────────
+# ── 앱 레이아웃 ────────────────────────────────────────────────────────────────
+
 st.title("Dasom")
 
+# 세션 초기화
 if "messages" not in st.session_state:
     st.session_state["messages"] = []
+if "retriever" not in st.session_state:
+    st.session_state["retriever"] = None
 
 with st.sidebar:
     clear_btn = st.button("대화 초기화")
+
     selected_prompt = st.selectbox(
         "프롬프트를 선택해 주세요.",
-        ("기본모드", "SNS 게시글", "요약", "이메일 요약"),
-        index=0
+        ("기본모드", "SNS 게시글", "요약", "이메일 요약", "PDF 문서 QA"),
+        index=0,
     )
-    if selected_prompt == "이메일 요약":
+
+    # ── PDF 업로드 UI (PDF 문서 QA 선택 시에만 표시) ──
+    if selected_prompt == "PDF 문서 QA":
+        st.divider()
+        uploaded_file = st.file_uploader(
+            "📄 PDF 파일을 업로드하세요",
+            type=["pdf"],
+            help="업로드한 PDF를 기반으로 질문에 답변합니다.",
+        )
+
+        if uploaded_file:
+            # 이미 같은 파일이 처리된 경우 재처리 방지
+            if st.session_state.get("uploaded_filename") != uploaded_file.name:
+                with st.spinner("📚 문서를 분석하는 중입니다..."):
+                    # 임시 파일로 저장 후 retriever 생성
+                    with tempfile.NamedTemporaryFile(
+                        delete=False, suffix=".pdf"
+                    ) as tmp:
+                        tmp.write(uploaded_file.read())
+                        tmp_path = tmp.name
+
+                    try:
+                        st.session_state["retriever"] = build_retriever(tmp_path)
+                        st.session_state["uploaded_filename"] = uploaded_file.name
+                        st.success(f"✅ '{uploaded_file.name}' 분석 완료!")
+                    except Exception as e:
+                        st.error(f"❌ 문서 처리 중 오류가 발생했습니다: {e}")
+                    finally:
+                        os.unlink(tmp_path)
+            else:
+                st.success(f"✅ '{uploaded_file.name}' 분석 완료!")
+        else:
+            # 파일이 없으면 retriever 초기화
+            st.session_state["retriever"] = None
+            st.session_state.pop("uploaded_filename", None)
+            st.info("📎 PDF를 업로드하면 문서 기반 QA를 시작합니다.")
+
+    elif selected_prompt == "이메일 요약":
         st.info("📧 이메일 원문을 채팅창에 붙여넣으세요.")
 
 if clear_btn:
@@ -109,47 +177,56 @@ if clear_btn:
 
 print_messages()
 
-placeholder = "이메일 내용을 붙여넣으세요!" if selected_prompt == "이메일 요약" else "궁금한 내용을 물어보세요!"
+# 입력 placeholder 동적 설정
+placeholder_map = {
+    "이메일 요약": "이메일 내용을 붙여넣으세요!",
+    "PDF 문서 QA": "문서에 대해 궁금한 내용을 물어보세요!",
+}
+placeholder = placeholder_map.get(selected_prompt, "궁금한 내용을 물어보세요!")
+
 user_input = st.chat_input(placeholder)
 
 if user_input:
     st.chat_message("user").write(user_input)
-    chain = create_chain(selected_prompt)
 
     with st.chat_message("assistant"):
-        if selected_prompt == "이메일 요약":
+
+        # ── PDF 문서 QA 분기 ──────────────────────────────────────────────────
+        if selected_prompt == "PDF 문서 QA":
+            retriever = st.session_state.get("retriever")
+            if retriever is None:
+                ai_answer = "⚠️ 먼저 사이드바에서 PDF 파일을 업로드해 주세요."
+                st.markdown(ai_answer)
+            else:
+                container = st.empty()
+                ai_answer = ""
+                rag_chain = create_rag_chain(retriever)
+                for token in rag_chain.stream(user_input):
+                    ai_answer += token
+                    container.markdown(ai_answer)
+
+        # ── 이메일 요약 분기 ──────────────────────────────────────────────────
+        elif selected_prompt == "이메일 요약":
+            chain = create_email_chain()
             try:
                 result = chain.invoke({"email_conversation": user_input})
-
-                query = f"{result.person} {result.company} {result.email}"
-                search_result = search.run(query)
-                search_result_string = "\n".join(search_result)
-
-                email_report_chain = create_email_report_chain()
-                email_report_response = email_report_chain.invoke({
-                    "sender": result.person,
-                    "additional_information": search_result_string,
-                    "company": result.company,
-                    "email": result.email,
-                    "subject": result.subject,
-                    "summary": result.summary,
-                    "date": result.date
-                })
-
-                st.markdown("---")
-                st.markdown(email_report_response)
-                ai_answer = email_report_response
-
-            except Exception as e:
-                ai_answer = "⚠️ 이메일 형식의 내용을 입력해 주세요.\n\nFrom, Subject, 본문이 포함된 이메일을 붙여넣으면 요약해드립니다."
+                render_email_summary(result)
+                ai_answer = (
+                    f"발신자: {result.person} / 회사: {result.company} / 요약: {result.summary}"
+                )
+            except Exception:
+                ai_answer = (
+                    "⚠️ 이메일 형식의 내용을 입력해 주세요.\n\n"
+                    "From, Subject, 본문이 포함된 이메일을 붙여넣으면 요약해드립니다."
+                )
                 st.markdown(ai_answer)
+
+        # ── 일반 모드 분기 ────────────────────────────────────────────────────
         else:
+            chain = create_chain(selected_prompt)
             container = st.empty()
             ai_answer = ""
-            for token in chain.stream({
-                "question": user_input,
-                "chat_history": get_chat_history()
-            }):
+            for token in chain.stream({"question": user_input}):
                 ai_answer += token
                 container.markdown(ai_answer)
 
