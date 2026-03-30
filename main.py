@@ -63,6 +63,25 @@ def create_rag_chain(retriever):
     )
 
 
+def enhance_prompt(user_question: str, task: str) -> str:
+    """
+    prompt-maker.yaml을 활용해 사용자 질문을 LLM으로 강화한 뒤 반환합니다.
+    triple-quote(\"\"\"...\"\"\")로 감싸진 부분만 추출합니다.
+    """
+    prompt = load_prompt("prompt-maker.yaml", encoding="utf-8")
+    llm = ChatOpenAI(model="gpt-4o", temperature=0.7)
+    chain = prompt | llm | StrOutputParser()
+
+    raw = chain.invoke({"task": task, "question": user_question})
+
+    # YAML 템플릿이 결과를 triple-quote로 감싸도록 지시하므로 추출
+    if '"""' in raw:
+        parts = raw.split('"""')
+        if len(parts) >= 3:
+            return parts[1].strip()
+    return raw.strip()
+
+
 def create_chain(prompt_type):
     if prompt_type == "이메일 요약":
         return create_email_chain()
@@ -127,6 +146,10 @@ if "retriever" not in st.session_state:
 if "image_path" not in st.session_state:
     st.session_state["image_path"] = None
 
+# 프롬프트 강화 관련 변수 기본값 (사이드바 렌더링 전 선언)
+use_enhance = False
+enhance_task = ""
+
 with st.sidebar:
     clear_btn = st.button("대화 초기화")
 
@@ -135,6 +158,19 @@ with st.sidebar:
         ("기본모드", "SNS 게시글", "요약", "이메일 요약", "PDF 문서 QA", "이미지 QA"),
         index=0,
     )
+
+    # ── 프롬프트 강화 옵션 (이메일 요약 / 이미지 QA / PDF QA 제외) ──
+    enhance_modes = ("기본모드", "SNS 게시글", "요약")
+    if selected_prompt in enhance_modes:
+        st.divider()
+        use_enhance = st.toggle("✨ 프롬프트 자동 강화", value=False)
+        if use_enhance:
+            enhance_task = st.text_input(
+                "강화 목표 (task)",
+                placeholder="예: 블로그 글쓰기, 파이썬 코딩, 번역",
+                help="LLM이 어떤 작업에 맞춰 프롬프트를 강화할지 지정합니다.",
+            )
+        st.divider()
 
     # ── PDF 업로드 UI (PDF 문서 QA 선택 시에만 표시) ──
     if selected_prompt == "PDF 문서 QA":
@@ -281,10 +317,23 @@ if user_input:
 
         # ── 일반 모드 분기 ────────────────────────────────────────────────────
         else:
+            # 프롬프트 강화가 켜져 있으면 질문을 먼저 개선
+            actual_question = user_input
+            if use_enhance and enhance_task:
+                with st.status("✨ 프롬프트를 강화하는 중...", expanded=True) as status:
+                    try:
+                        enhanced = enhance_prompt(user_input, enhance_task)
+                        st.markdown(f"**강화된 프롬프트**\n\n{enhanced}")
+                        actual_question = enhanced
+                        status.update(label="✅ 프롬프트 강화 완료!", state="complete")
+                    except Exception as e:
+                        st.warning(f"프롬프트 강화 실패, 원본 질문을 사용합니다. ({e})")
+                        status.update(label="⚠️ 강화 실패 — 원본 질문 사용", state="error")
+
             chain = create_chain(selected_prompt)
             container = st.empty()
             ai_answer = ""
-            for token in chain.stream({"question": user_input}):
+            for token in chain.stream({"question": actual_question}):
                 ai_answer += token
                 container.markdown(ai_answer)
 
