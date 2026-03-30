@@ -10,6 +10,7 @@ import tempfile
 import os
 
 from retriever import build_retriever
+from multimodal import stream_multimodal_answer
 
 load_dotenv()
 
@@ -123,13 +124,15 @@ if "messages" not in st.session_state:
     st.session_state["messages"] = []
 if "retriever" not in st.session_state:
     st.session_state["retriever"] = None
+if "image_path" not in st.session_state:
+    st.session_state["image_path"] = None
 
 with st.sidebar:
     clear_btn = st.button("대화 초기화")
 
     selected_prompt = st.selectbox(
         "프롬프트를 선택해 주세요.",
-        ("기본모드", "SNS 게시글", "요약", "이메일 요약", "PDF 문서 QA"),
+        ("기본모드", "SNS 게시글", "요약", "이메일 요약", "PDF 문서 QA", "이미지 QA"),
         index=0,
     )
 
@@ -172,6 +175,42 @@ with st.sidebar:
     elif selected_prompt == "이메일 요약":
         st.info("📧 이메일 원문을 채팅창에 붙여넣으세요.")
 
+    # ── 이미지 업로드 UI (이미지 QA 선택 시에만 표시) ──
+    elif selected_prompt == "이미지 QA":
+        st.divider()
+        selected_model = st.selectbox(
+            "🤖 모델 선택",
+            ["gpt-4.1-mini", "gpt-4.1-nano", "gpt-4o"],
+            index=0,
+        )
+        system_prompt = st.text_area(
+            "시스템 프롬프트",
+            "당신은 이미지를 분석하는 AI 어시스턴트입니다.\n이미지에 대해 한국어로 친절하고 상세하게 답변해 주세요.",
+            height=150,
+        )
+        uploaded_image = st.file_uploader(
+            "🖼️ 이미지를 업로드하세요",
+            type=["jpg", "jpeg", "png"],
+            help="업로드한 이미지를 기반으로 질문에 답변합니다.",
+        )
+
+        if uploaded_image:
+            # 캐시 디렉토리 생성
+            os.makedirs(".cache/files", exist_ok=True)
+            image_path = f".cache/files/{uploaded_image.name}"
+
+            if st.session_state.get("uploaded_image_name") != uploaded_image.name:
+                with open(image_path, "wb") as f:
+                    f.write(uploaded_image.read())
+                st.session_state["image_path"] = image_path
+                st.session_state["uploaded_image_name"] = uploaded_image.name
+
+            st.image(image_path, caption=uploaded_image.name, use_container_width=True)
+        else:
+            st.session_state["image_path"] = None
+            st.session_state.pop("uploaded_image_name", None)
+            st.info("🖼️ 이미지를 업로드하면 이미지 기반 QA를 시작합니다.")
+
 if clear_btn:
     st.session_state["messages"] = []
 
@@ -181,6 +220,7 @@ print_messages()
 placeholder_map = {
     "이메일 요약": "이메일 내용을 붙여넣으세요!",
     "PDF 문서 QA": "문서에 대해 궁금한 내용을 물어보세요!",
+    "이미지 QA": "이미지에 대해 궁금한 내용을 물어보세요!",
 }
 placeholder = placeholder_map.get(selected_prompt, "궁금한 내용을 물어보세요!")
 
@@ -202,6 +242,24 @@ if user_input:
                 ai_answer = ""
                 rag_chain = create_rag_chain(retriever)
                 for token in rag_chain.stream(user_input):
+                    ai_answer += token
+                    container.markdown(ai_answer)
+
+        # ── 이미지 QA 분기 ────────────────────────────────────────────────────
+        elif selected_prompt == "이미지 QA":
+            image_path = st.session_state.get("image_path")
+            if image_path is None:
+                ai_answer = "⚠️ 먼저 사이드바에서 이미지를 업로드해 주세요."
+                st.markdown(ai_answer)
+            else:
+                container = st.empty()
+                ai_answer = ""
+                for token in stream_multimodal_answer(
+                    image_path=image_path,
+                    user_prompt=user_input,
+                    system_prompt=system_prompt,
+                    model_name=selected_model,
+                ):
                     ai_answer += token
                     container.markdown(ai_answer)
 
